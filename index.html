@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>カタン風マップジェネレーター（交差点確率付き）</title>
+    <link href="https://cdn.tailwindcss.com" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            /* justify-content: center; */ /* 右側に情報表示のため解除 */
+            align-items: flex-start; /* 上揃え */
+            min-height: 100vh;
+            margin: 0;
+            background-color: #f0f4f8;
+            padding-top: 20px; /* 上部に余白 */
+        }
+        #mainContent {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #controls {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        canvas {
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            background-color: #ffffff;
+            cursor: pointer; /* クリック可能を示す */
+        }
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            color: white;
+            background-color: #3b82f6;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2563eb;
+        }
+        .tooltip {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.75);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+            z-index: 10;
+        }
+        #probabilityTableContainer {
+            margin-left: 30px; /* キャンバスとの間隔 */
+            padding: 15px;
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            width: 250px; /* 幅を指定 */
+        }
+        #probabilityTableContainer h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+            color: #333;
+        }
+        #probabilityTable table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #probabilityTable th, #probabilityTable td {
+            border: 1px solid #ddd;
+            padding: 6px;
+            text-align: left;
+            font-size: 0.9em;
+        }
+        #probabilityTable th {
+            background-color: #f9fafb;
+        }
+        #probabilityTable tfoot td {
+            font-weight: bold;
+            background-color: #e2e8f0;
+        }
+    </style>
+</head>
+<body class="bg-slate-100">
+    <div id="mainContent">
+        <div id="controls" class="mb-4 p-4 bg-white rounded-lg shadow">
+            <button id="generateButton" class="px-4 py-2 text-white bg-blue-500 rounded-md hover:bg-blue-600">マップ生成</button>
+        </div>
+        <canvas id="mapCanvas"></canvas>
+    </div>
+    <div id="probabilityTableContainer">
+        <h3>資源獲得確率 (%)</h3>
+        <div id="probabilityTable">
+            <table>
+                <thead>
+                    <tr><th>資源</th><th>確率</th></tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="2">交差点をクリックしてください</td></tr>
+                </tbody>
+                <tfoot>
+                    <tr id="totalProbRow" style="display: none;">
+                        <td><strong>合計</strong></td>
+                        <td id="totalProbValue"></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    </div>
+    <div id="tooltip" class="tooltip"></div>
+
+    <script>
+        // --- 定数定義 ---
+        const HEX_SIZE = 40;
+        const TERRAIN_TYPES = {
+            DESERT: { color: '#F4A460', name: '砂漠', resource: null },
+            FOREST: { color: '#228B22', name: '森林', resource: '木材' },
+            PASTURE: { color: '#90EE90', name: '牧草地', resource: '羊毛' },
+            FIELD: { color: '#FFD700', name: '畑', resource: '小麦' },
+            HILLS: { color: '#A0522D', name: '丘陵', resource: 'レンガ' },
+            MOUNTAINS: { color: '#808080', name: '山地', resource: '鉱石' },
+        };
+        const RESOURCES = ['木材', '羊毛', '小麦', 'レンガ', '鉱石'];
+
+        const TERRAIN_DISTRIBUTION_DEFAULT = [
+            ...Array(1).fill(TERRAIN_TYPES.DESERT), ...Array(4).fill(TERRAIN_TYPES.FOREST),
+            ...Array(4).fill(TERRAIN_TYPES.PASTURE), ...Array(4).fill(TERRAIN_TYPES.FIELD),
+            ...Array(3).fill(TERRAIN_TYPES.HILLS), ...Array(3).fill(TERRAIN_TYPES.MOUNTAINS),
+        ];
+        const NUMBER_CHIPS_DEFAULT = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+        const MAP_LAYOUT = [3, 4, 5, 4, 3];
+        const TOTAL_TILES = MAP_LAYOUT.reduce((sum, count) => sum + count, 0);
+
+        // サイコロの目と確率 (36分のいくつか)
+        const DICE_PROBABILITIES = {
+            2: 1, 3: 2, 4: 3, 5: 4, 6: 5,
+            8: 5, 9: 4, 10: 3, 3: 1, 11: 2, 12: 1, // 3:1は誤り、正しくは 10:3, 11:2, 12:1
+            10: 3, 11: 2, 12: 1,
+            // 7は盗賊なので資源産出なし
+        };
+
+        // --- グローバル変数 ---
+        let canvas, ctx;
+        let mapGrid = []; // { ..., vertices: [{x,y}, ...] }
+        let tooltipElement;
+        let probabilityTableBody;
+        let totalProbRow; // 合計確率の行
+        let totalProbValue; // 合計確率の値表示要素
+        let selectedIntersectionPoint = null; // {x, y}
+
+        // --- 初期化処理 ---
+        window.onload = () => {
+            canvas = document.getElementById('mapCanvas');
+            ctx = canvas.getContext('2d');
+            tooltipElement = document.getElementById('tooltip');
+            probabilityTableBody = document.querySelector("#probabilityTable tbody");
+            totalProbRow = document.getElementById('totalProbRow');
+            totalProbValue = document.getElementById('totalProbValue');
+
+            document.getElementById('generateButton').addEventListener('click', () => {
+                selectedIntersectionPoint = null; // マップ再生成時に選択解除
+                updateProbabilityTable({}); // 表をリセット
+                generateAndDrawMap();
+            });
+            
+            setupCanvas();
+            generateAndDrawMap();
+
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseout', () => { tooltipElement.style.opacity = '0'; });
+            canvas.addEventListener('click', handleCanvasClick);
+        };
+
+        window.onresize = () => {
+            setupCanvas();
+            if (mapGrid.length > 0) {
+                drawMap();
+            }
+        };
+
+        function setupCanvas() {
+            const hexWidth = Math.sqrt(3) * HEX_SIZE;
+            const hexHeight = 2 * HEX_SIZE;
+            const maxTilesInRow = Math.max(...MAP_LAYOUT);
+            const canvasWidth = maxTilesInRow * hexWidth + hexWidth /2 ;
+            const numRows = MAP_LAYOUT.length;
+            const canvasHeight = (numRows - 1) * (hexHeight * 0.75) + hexHeight + hexHeight * 0.5;
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+        }
+
+        // --- マップ生成ロジック ---
+        function generateAndDrawMap() {
+            mapGrid = [];
+            let availableTerrains = shuffleArray([...TERRAIN_DISTRIBUTION_DEFAULT]);
+            let availableNumbers = shuffleArray([...NUMBER_CHIPS_DEFAULT]);
+            const hexWidth = Math.sqrt(3) * HEX_SIZE;
+            const hexHeight = 2 * HEX_SIZE;
+            const startY = hexHeight / 2 + 20;
+            let tileMapIndex = 0;
+
+            for (let r = 0; r < MAP_LAYOUT.length; r++) {
+                const tilesInRow = MAP_LAYOUT[r];
+                const rowContentWidth = tilesInRow * hexWidth;
+                const offsetX = (canvas.width - rowContentWidth) / 2;
+
+                for (let q = 0; q < tilesInRow; q++) {
+                    if (tileMapIndex >= TOTAL_TILES || availableTerrains.length === 0) break;
+                    const terrain = availableTerrains.pop();
+                    let numberChip = null;
+                    if (terrain.name !== TERRAIN_TYPES.DESERT.name && availableNumbers.length > 0) {
+                        numberChip = availableNumbers.pop();
+                    }
+                    const centerX = offsetX + q * hexWidth + hexWidth / 2;
+                    const centerY = startY + r * (hexHeight * 0.75);
+                    
+                    // 各タイルの頂点座標を計算して保存
+                    const vertices = [];
+                    for (let i = 0; i < 6; i++) {
+                        vertices.push({
+                            x: centerX + HEX_SIZE * Math.cos(Math.PI / 180 * (60 * i + 30)),
+                            y: centerY + HEX_SIZE * Math.sin(Math.PI / 180 * (60 * i + 30))
+                        });
+                    }
+
+                    mapGrid.push({
+                        qIndexInRow: q, rIndex: r, terrain: terrain, number: numberChip,
+                        centerX: centerX, centerY: centerY, vertices: vertices
+                    });
+                    tileMapIndex++;
+                }
+            }
+            adjustRedNumbers();
+            drawMap();
+        }
+
+        function adjustRedNumbers() { 
+            for (let i = 0; i < mapGrid.length; i++) {
+                if (mapGrid[i].number === 6 || mapGrid[i].number === 8) {
+                    const neighbors = getNeighborTiles(mapGrid[i]);
+                    for (const neighbor of neighbors) {
+                        if ((neighbor.number === 6 || neighbor.number === 8) && neighbor.terrain.name !== TERRAIN_TYPES.DESERT.name) {
+                            for (let j = 0; j < mapGrid.length; j++) {
+                                if (mapGrid[j].terrain.name !== TERRAIN_TYPES.DESERT.name &&
+                                    mapGrid[j].number !== 6 && mapGrid[j].number !== 8 &&
+                                    mapGrid[j].number !== null &&
+                                    !isRedNumberNeighborForTile(mapGrid[j], mapGrid[i].number) 
+                                ) {
+                                    [mapGrid[i].number, mapGrid[j].number] = [mapGrid[j].number, mapGrid[i].number];
+                                    break; 
+                                }
+                            }
+                        }
+                         if (mapGrid[i].number !== 6 && mapGrid[i].number !== 8) break; 
+                    }
+                }
+            }
+        }
+
+        function isRedNumberNeighborForTile(tile, newNumberForOriginalTile) { 
+            const neighbors = getNeighborTiles(tile);
+            for (const neighbor of neighbors) {
+                if (neighbor.number === newNumberForOriginalTile) return true;
+            }
+            return false;
+        }
+
+        function getNeighborTiles(currentTile) { 
+            const neighbors = [];
+            const maxDistance = HEX_SIZE * Math.sqrt(3) * 1.2; 
+            for (const tile of mapGrid) {
+                if (tile === currentTile) continue; 
+                const dist = Math.sqrt(
+                    Math.pow(tile.centerX - currentTile.centerX, 2) +
+                    Math.pow(tile.centerY - currentTile.centerY, 2)
+                );
+                if (dist < maxDistance) {
+                    neighbors.push(tile);
+                }
+            }
+            return neighbors;
+        }
+
+        // --- 描画ロジック ---
+        function drawMap() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (mapGrid.length === 0) return;
+            
+            mapGrid.forEach(tileData => {
+                drawHexagon(tileData.centerX, tileData.centerY, HEX_SIZE, tileData.terrain.color, tileData.vertices);
+                if (tileData.number) {
+                    drawNumber(tileData.centerX, tileData.centerY, tileData.number);
+                }
+            });
+
+            // 選択された交差点を描画
+            if (selectedIntersectionPoint) {
+                ctx.beginPath();
+                ctx.arc(selectedIntersectionPoint.x, selectedIntersectionPoint.y, HEX_SIZE / 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.7)'; // 赤い半透明の円
+                ctx.fill();
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        function drawHexagon(x, y, size, color, vertices) {
+            ctx.beginPath();
+            vertices.forEach(vert => ctx.lineTo(vert.x, vert.y));
+            ctx.closePath();
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+
+        function drawNumber(x, y, number) { 
+            ctx.fillStyle = (number === 6 || number === 8) ? 'red' : 'black';
+            ctx.font = `bold ${HEX_SIZE / 2}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(number.toString(), x, y);
+        }
+
+        // --- 交差点関連ロジック ---
+        function handleCanvasClick(event) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            selectedIntersectionPoint = findClosestIntersection(mouseX, mouseY);
+
+            if (selectedIntersectionPoint) {
+                const adjacentTiles = getTilesAroundPoint(selectedIntersectionPoint);
+                const probabilities = calculateResourceProbabilities(adjacentTiles);
+                updateProbabilityTable(probabilities);
+            } else {
+                updateProbabilityTable({}); // 何も選択されなかったらクリア
+            }
+            drawMap(); // 選択された交差点のハイライトを再描画
+        }
+
+        function findClosestIntersection(mouseX, mouseY) {
+            let closestPoint = null;
+            let minDistance = Infinity;
+            const clickThreshold = HEX_SIZE / 2; // クリック判定の許容範囲
+
+            mapGrid.forEach(tile => {
+                tile.vertices.forEach(vertex => {
+                    const distance = Math.sqrt(Math.pow(vertex.x - mouseX, 2) + Math.pow(vertex.y - mouseY, 2));
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        closestPoint = vertex;
+                    }
+                });
+            });
+
+            return (minDistance < clickThreshold) ? closestPoint : null;
+        }
+
+        function getTilesAroundPoint(point) {
+            const adjacentTiles = [];
+            const tolerance = 1; // 座標の許容誤差
+
+            mapGrid.forEach(tile => {
+                for (const vertex of tile.vertices) {
+                    if (Math.abs(vertex.x - point.x) < tolerance && Math.abs(vertex.y - point.y) < tolerance) {
+                        if (!adjacentTiles.includes(tile)) { // 重複を避ける
+                           adjacentTiles.push(tile);
+                        }
+                        break; 
+                    }
+                }
+            });
+            return adjacentTiles;
+        }
+
+        // --- 確率計算と表示 ---
+        function calculateResourceProbabilities(tiles) {
+            const resourceProbs = {};
+            let totalProbNumerator = 0; // 合計確率の分子 (36分のいくつか)
+
+            RESOURCES.forEach(r => resourceProbs[r] = 0); // 初期化
+
+            tiles.forEach(tile => {
+                if (tile.terrain.resource && tile.number && DICE_PROBABILITIES[tile.number]) {
+                    const probPerDot = DICE_PROBABILITIES[tile.number]; // 36分のいくつか
+                    resourceProbs[tile.terrain.resource] += probPerDot;
+                    totalProbNumerator += probPerDot; // 合計に加算
+                }
+            });
+            
+            // パーセンテージに変換 (母数は36)
+            for (const resource in resourceProbs) {
+                resourceProbs[resource] = (resourceProbs[resource] / 36 * 100).toFixed(1); // 小数点以下1桁
+            }
+
+            // 合計確率をパーセンテージで追加
+            resourceProbs.total = (totalProbNumerator / 36 * 100).toFixed(1);
+
+            return resourceProbs;
+        }
+
+        function updateProbabilityTable(probabilities) {
+            probabilityTableBody.innerHTML = ''; // テーブル内容をクリア
+            totalProbRow.style.display = 'none'; // 合計行を非表示に
+
+            if (Object.keys(probabilities).length === 0 || !selectedIntersectionPoint) {
+                const row = probabilityTableBody.insertRow();
+                const cell = row.insertCell();
+                cell.colSpan = 2;
+                cell.textContent = '交差点をクリックしてください';
+                return;
+            }
+
+            let hasResource = false;
+            RESOURCES.forEach(resource => {
+                const prob = parseFloat(probabilities[resource]) || 0;
+                if (prob > 0) {
+                    hasResource = true;
+                    const row = probabilityTableBody.insertRow();
+                    row.insertCell().textContent = resource;
+                    row.insertCell().textContent = `${prob}%`;
+                }
+            });
+            
+            if (!hasResource) {
+                const row = probabilityTableBody.insertRow();
+                const cell = row.insertCell();
+                cell.colSpan = 2;
+                cell.textContent = 'この交差点からは資源を得られません。';
+            } else {
+                // 合計確率を表示
+                totalProbValue.textContent = `${probabilities.total}%`;
+                totalProbRow.style.display = ''; // 合計行を表示
+            }
+        }
+
+        // --- ユーティリティ関数 ---
+        function shuffleArray(array) { 
+            for (let i = array.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [array[i], array[j]] = [array[j], array[i]];
+            }
+            return array;
+        }
+
+        function handleMouseMove(event) { 
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+
+            let foundTile = null;
+            for (const tile of mapGrid) {
+                const dist = Math.sqrt(Math.pow(mouseX - tile.centerX, 2) + Math.pow(mouseY - tile.centerY, 2));
+                if (dist < HEX_SIZE * 0.866) { 
+                    foundTile = tile;
+                    break;
+                }
+            }
+
+            if (foundTile) {
+                tooltipElement.innerHTML = `地形: ${foundTile.terrain.name}<br>資源: ${foundTile.terrain.resource || 'なし'}<br>数字: ${foundTile.number || 'なし'}`;
+                tooltipElement.style.left = `${event.clientX + 15}px`;
+                tooltipElement.style.top = `${event.clientY + 15}px`;
+                tooltipElement.style.opacity = '1';
+            } else {
+                tooltipElement.style.opacity = '0';
+            }
+        }
+    </script>
+</body>
+</html>
